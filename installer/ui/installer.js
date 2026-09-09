@@ -201,8 +201,16 @@
 
   async function start() {
     try {
+      window.startupDiagnostics.phase('preload-bridge');
+      if (!api || typeof api.getDefaults !== 'function') {
+        throw new Error('PRELOAD_BRIDGE_UNAVAILABLE: window.velronInstaller.getDefaults is not available.');
+      }
+      window.startupDiagnostics.phase('load-defaults');
       environment = await api.getDefaults(); options = environment.options;
+      if (window.startupDiagnostics.failed) return;
+      window.startupDiagnostics.environment(environment);
       language = environment.locale.startsWith('ko') ? 'ko' : 'en';
+      window.startupDiagnostics.phase('subscribe-progress');
       api.onProgress(event => {
         if (event.type === 'log') {
           logs.push(event.line); if (logs.length > 600) logs.shift();
@@ -210,9 +218,11 @@
           if (output) { const bottom = output.scrollHeight - output.scrollTop - output.clientHeight < 40; output.textContent = logs.join('\n'); if (bottom) output.scrollTop = output.scrollHeight; }
         } else if (event.type === 'stage') { activeStage = event.stage; if (status === 'installing') render(); }
       });
+      window.startupDiagnostics.phase('render-wizard');
       render();
-    } catch {
-      root.textContent = t('unavailable'); root.className = 'loading'; root.removeAttribute('aria-busy');
+      window.startupDiagnostics.ready();
+    } catch (error) {
+      window.startupDiagnostics.fail(error);
     }
   }
   start();

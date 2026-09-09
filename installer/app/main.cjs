@@ -7,6 +7,16 @@ const { createInstallRunner } = require('./installRunner.cjs');
 const { validateFilesystemOptions } = require('./installPaths.cjs');
 const { isServerSettings } = require('./serverSettings.cjs');
 const { openInstalledServer } = require('./managementBootstrap.cjs');
+const { createStartupDiagnostics, redact } = require('./startupDiagnostics.cjs');
+
+let logDirectory;
+try { logDirectory = app.getPath('logs'); }
+catch { logDirectory = path.join(require('node:os').tmpdir(), 'Velron-Installer-logs'); }
+const diagnostics = createStartupDiagnostics({ directory: logDirectory, version: app.getVersion() });
+function showStartupFailure(stage, error) {
+  const report = diagnostics.record(stage, error);
+  dialog.showErrorBox('Velron Installer — startup error', report);
+}
 
 let window;
 let runner;
@@ -39,9 +49,18 @@ async function inspectConfig(directory) {
 function handle(channel, callback) {
   ipcMain.handle(channel, async (event, ...args) => {
     if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== pageUrl) {
-      throw new Error('Untrusted installer request.');
+      const error = new Error(`IPC_SENDER_REJECTED: ${channel}\nExpected page: ${pageUrl}\nActual page: ${event.senderFrame?.url || '(unavailable)'}\nSame window: ${event.sender === window?.webContents}\nMain frame: ${event.senderFrame === window?.webContents.mainFrame}`);
+      diagnostics.record('ipc-validation', error);
+      throw new Error(`${redact(error.message)}\nLog file: ${diagnostics.file}`);
     }
-    return callback(...args);
+    try { return await callback(...args); }
+    catch (error) {
+      if (channel === 'installer:defaults') {
+        diagnostics.record('load-defaults', error);
+        throw new Error(`${redact(error.stack || error.message)}\nLog file: ${diagnostics.file}`);
+      }
+      throw error;
+    }
   });
 }
 
@@ -68,6 +87,12 @@ function createWindow() {
       sandbox: true, nodeIntegration: false, webSecurity: true, spellcheck: false },
   });
   window.setMenu(null);
+  window.webContents.on('preload-error', (_event, preloadPath, error) => {
+    showStartupFailure(`preload: ${preloadPath}`, error);
+  });
+  window.webContents.on('render-process-gone', (_event, details) => {
+    showStartupFailure('renderer-process-gone', new Error(`Reason: ${details.reason}; exit code: ${details.exitCode}`));
+  });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.on('will-attach-webview', event => event.preventDefault());
@@ -79,7 +104,7 @@ function createWindow() {
     confirmCancellation().finally(() => { closePending = false; });
   });
   window.once('ready-to-show', () => window.show());
-  window.loadFile(pagePath);
+  window.loadFile(pagePath).catch(error => showStartupFailure('load-page', error));
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -94,6 +119,15 @@ if (!app.requestSingleInstanceLock()) {
     } });
     handle('installer:defaults', () => ({ options: getDefaults(), platform: process.platform,
       arch: process.arch, locale: app.getLocale(), version: app.getVersion() }));
+    handle('installer:startup-failure', input => {
+      if (!input || typeof input.stage !== 'string' || input.stage.length > 80 ||
+          typeof input.detail !== 'string' || input.detail.length > 24000) throw new Error('Invalid startup diagnostic.');
+      return diagnostics.record(input.stage, input.detail);
+    });
+    handle('installer:copy-startup-diagnostics', value => {
+      if (typeof value !== 'string' || value.length > 300000) throw new Error('Invalid startup diagnostic.');
+      clipboard.writeText(redact(value));
+    });
     handle('installer:inspect', inspectConfig);
     handle('installer:directory', async directory => {
       if (runner.running) throw new Error('Installation is running.');
@@ -136,7 +170,7 @@ if (!app.requestSingleInstanceLock()) {
     createWindow();
     app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
   }).catch(error => {
-    dialog.showErrorBox('Velron Installer', error.message);
+    showStartupFailure('main-initialization', error);
     app.quit();
   });
   app.on('window-all-closed', () => app.quit());

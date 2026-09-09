@@ -21,6 +21,15 @@ const fs = require('node:fs/promises');
       catch { return true; }
     });
     assert.equal(rejected, true);
+    const diagnostics = await page.evaluate(async () => {
+      const report = await window.velronInstaller.reportStartupFailure({ stage: 'native-smoke', detail: 'Synthetic startup diagnostic' });
+      await window.velronInstaller.copyStartupDiagnostics(report);
+      return report;
+    });
+    assert.match(diagnostics, /Synthetic startup diagnostic/);
+    assert.match(diagnostics, /Log file:/);
+    const logFile = /^Log file: (.+)$/m.exec(diagnostics)[1];
+    assert.equal(await fs.readFile(logFile, 'utf8'), diagnostics);
     await fs.mkdir(path.resolve(__dirname, '../test-results'), { recursive: true });
     await page.screenshot({ path: path.resolve(__dirname, `../test-results/native-${process.platform}.png`) });
     console.log(`Native ${process.platform} window, preload bridge, and validation passed.`);
