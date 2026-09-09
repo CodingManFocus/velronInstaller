@@ -4,11 +4,24 @@ const { _electron: electron } = require('playwright');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs/promises');
+const os = require('node:os');
 
 (async () => {
   const executablePath = process.env.VELRON_SMOKE_EXECUTABLE;
-  const desktop = await electron.launch({ ...(executablePath ? { executablePath, args: [] } : { args: [path.resolve(__dirname, '..')] }), timeout: 30000 });
+  let fixture;
+  let desktop;
   try {
+    let appPath = path.resolve(__dirname, '..');
+    if (!executablePath) {
+      fixture = await fs.mkdtemp(path.join(os.tmpdir(), 'velron-page-smoke-'));
+      appPath = path.join(fixture, 'TESTER~1', 'Velron Installer');
+      await fs.mkdir(appPath, { recursive: true });
+      for (const item of ['app', 'ui', 'package.json']) {
+        await fs.cp(path.resolve(__dirname, '..', item), path.join(appPath, item), { recursive: true });
+      }
+    }
+    // Exercise the IPC guard under a tilde + space path, as in Windows 8.3 TEMP paths.
+    desktop = await electron.launch({ ...(executablePath ? { executablePath, args: [] } : { args: [appPath] }), timeout: 30000 });
     const page = await desktop.firstWindow();
     await page.locator('.component-grid').waitFor();
     const info = await page.evaluate(() => window.velronInstaller.getDefaults());
@@ -33,5 +46,8 @@ const fs = require('node:fs/promises');
     await fs.mkdir(path.resolve(__dirname, '../test-results'), { recursive: true });
     await page.screenshot({ path: path.resolve(__dirname, `../test-results/native-${process.platform}.png`) });
     console.log(`Native ${process.platform} window, preload bridge, and validation passed.`);
-  } finally { await desktop.close(); }
+  } finally {
+    try { if (desktop) await desktop.close(); }
+    finally { if (fixture) await fs.rm(fixture, { recursive: true, force: true }); }
+  }
 })().catch(error => { console.error(error); process.exitCode = 1; });

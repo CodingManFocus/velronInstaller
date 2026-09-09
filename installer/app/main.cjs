@@ -8,6 +8,7 @@ const { validateFilesystemOptions } = require('./installPaths.cjs');
 const { isServerSettings } = require('./serverSettings.cjs');
 const { openInstalledServer } = require('./managementBootstrap.cjs');
 const { createStartupDiagnostics, redact } = require('./startupDiagnostics.cjs');
+const { isInstallerPage } = require('./installerPage.cjs');
 
 let logDirectory;
 try { logDirectory = app.getPath('logs'); }
@@ -48,7 +49,7 @@ async function inspectConfig(directory) {
 
 function handle(channel, callback) {
   ipcMain.handle(channel, async (event, ...args) => {
-    if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || event.senderFrame.url !== pageUrl) {
+    if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame || !isInstallerPage(event.senderFrame.url, pageUrl)) {
       const error = new Error(`IPC_SENDER_REJECTED: ${channel}\nExpected page: ${pageUrl}\nActual page: ${event.senderFrame?.url || '(unavailable)'}\nSame window: ${event.sender === window?.webContents}\nMain frame: ${event.senderFrame === window?.webContents.mainFrame}`);
       diagnostics.record('ipc-validation', error);
       throw new Error(`${redact(error.message)}\nLog file: ${diagnostics.file}`);
