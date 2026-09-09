@@ -163,3 +163,22 @@ The renderer has no Node integration, network access, navigation, child windows,
 permissions. Tokens are passed only in the child environment and redacted from retained logs;
 UI preferences and tokens are not saved by the Installer. The installed Client's connection
 configuration behavior remains the responsibility of the shared engine.
+# Startup diagnostics
+
+If the wizard cannot initialize, its error screen identifies the failed stage
+(`preload-bridge`, `load-defaults`, `subscribe-progress`, or `render-wizard`) and
+shows the original error and stack. Initialization that stalls for 15 seconds
+shows `STARTUP_TIMEOUT`. Use **Copy diagnostic log**; if the app connection or
+clipboard is unavailable, select the read-only log and copy it manually.
+
+Main-process startup errors, preload failures, page-load failures, renderer
+exits, and rejected IPC senders are recorded in a per-process `startup-*.log`
+under Electron's application logs directory. The native error dialog or
+diagnostic report includes the exact path. If writing fails, the in-memory
+report remains available and identifies the write error. When renderer IPC is
+unavailable, the on-screen report remains independent of that connection.
+
+Reports include runtime versions and diagnostic file/page paths, not installation
+options, configuration contents, or a dump of environment variables. Known token
+formats are redacted. IPC sender validation remains enforced. Only initialization
+errors are handled by the startup screen; normal installation logs are unchanged.
