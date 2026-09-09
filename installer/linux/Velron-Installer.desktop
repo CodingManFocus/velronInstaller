@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Velron Installer
+Comment=Open the Velron installation wizard
+Exec=/bin/sh -c "exec /bin/sh \\"\\$(dirname \\"\\$1\\")/launch.sh\\"" velron-installer %k
+Icon=system-software-install
+Terminal=false
+Categories=System;
+StartupNotify=true

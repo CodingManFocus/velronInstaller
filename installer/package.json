@@ -1,0 +1,55 @@
+{
+  "name": "velron-installer",
+  "version": "2.0.0",
+  "description": "The Velron desktop installation wizard",
+  "homepage": "https://github.com/CodingManFocus/velronInstaller",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CodingManFocus/velronInstaller.git"
+  },
+  "author": "CodenameMC",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": { "node": ">=22.12.0" },
+  "main": "app/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "test:ui": "playwright test",
+    "build": "electron-builder --publish never",
+    "build:windows": "electron-builder --win portable --x64 --arm64 --publish never",
+    "build:macos": "electron-builder --mac zip --universal --publish never",
+    "build:linux": "electron-builder --linux dir --x64 --arm64 --publish never"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "electron": "44.2.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "kr.codenamemc.velron.installer",
+    "productName": "Velron Installer",
+    "copyright": "Copyright © CodenameMC",
+    "asar": true,
+    "directories": { "output": "../dist", "buildResources": "assets" },
+    "files": ["app/**/*", "ui/**/*", "package.json"],
+    "extraResources": [
+      { "from": "../install.sh", "to": "engine/install.sh" },
+      { "from": "../install.ps1", "to": "engine/install.ps1" },
+      { "from": "../LICENSE", "to": "LICENSE" }
+    ],
+    "win": {
+      "artifactName": "Velron-Installer-windows-${arch}.${ext}",
+      "icon": "assets/icon.png"
+    },
+    "portable": { "requestExecutionLevel": "user" },
+    "mac": {
+      "artifactName": "Velron-Installer-macos-${arch}.${ext}",
+      "category": "public.app-category.utilities",
+      "icon": "assets/icon.png",
+      "identity": "-",
+      "hardenedRuntime": false
+    },
+    "linux": { "executableName": "velron-installer", "category": "Utility", "icon": "assets/icon.png" }
+  }
+}

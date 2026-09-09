@@ -1,0 +1,196 @@
+name: Installer builds and releases
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/installer-checks.yml
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: installer/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - name: Check PowerShell GUI input adapter
+        shell: pwsh
+        run: ./tests/testPowerShellAdapter.ps1
+      - run: node tests/nativeSmoke.cjs
+      - run: npm run build:windows
+      - name: Check packaged Windows application
+        shell: pwsh
+        run: |
+          $env:VELRON_SMOKE_EXECUTABLE = (Resolve-Path '../dist/win-unpacked/Velron Installer.exe').Path
+          node tests/nativeSmoke.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged Windows smoke test failed.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: installer-windows
+          path: dist/*.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          overwrite: true
+          name: gui-checks-windows
+          path: installer/test-results/
+
+  macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: installer/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: node tests/nativeSmoke.cjs
+      - run: npm run build:macos
+        env:
+          # package.json explicitly uses the ad-hoc identity; no certificate is loaded.
+          CSC_FOR_PULL_REQUEST: 'true'
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Check universal application
+        run: |
+          bundle='../dist/mac-universal/Velron Installer.app'
+          lipo "$bundle/Contents/MacOS/Velron Installer" -verify_arch x86_64 arm64
+          codesign --verify --deep --strict "$bundle"
+          VELRON_SMOKE_EXECUTABLE="$PWD/$bundle/Contents/MacOS/Velron Installer" node tests/nativeSmoke.cjs
+      - uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: installer-macos
+          path: dist/*.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          overwrite: true
+          name: gui-checks-macos
+          path: installer/test-results/
+
+  linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: installer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: installer/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:ui
+      - name: Prepare Linux sandbox
+        run: |
+          node -e "require('electron')"
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+      - run: xvfb-run -a node tests/nativeSmoke.cjs
+      - run: npm run build:linux
+      - name: Check and package Linux applications
+        run: |
+          sudo chown root:root ../dist/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 ../dist/linux-unpacked/chrome-sandbox
+          VELRON_SMOKE_EXECUTABLE="$PWD/../dist/linux-unpacked/velron-installer" xvfb-run -a node tests/nativeSmoke.cjs
+          # The portable archive must not carry a privileged, CI-owned helper.
+          sudo chmod 755 ../dist/linux-unpacked/chrome-sandbox
+          sudo chown "$(id -u):$(id -g)" ../dist/linux-unpacked/chrome-sandbox
+          sh -n linux/launch.sh
+          shellcheck -s sh linux/launch.sh ../install.sh
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils
+          desktop-file-validate linux/Velron-Installer.desktop
+          bundle='../build/Velron Installer'
+          mkdir -p "$bundle/x64" "$bundle/arm64"
+          cp -a ../dist/linux-unpacked/. "$bundle/x64/"
+          cp -a ../dist/linux-arm64-unpacked/. "$bundle/arm64/"
+          cp linux/launch.sh linux/Velron-Installer.desktop README.md ../LICENSE "$bundle/"
+          chmod 755 "$bundle/launch.sh" "$bundle/Velron-Installer.desktop"
+          tar -czf ../dist/Velron-Installer-linux.tar.gz -C ../build 'Velron Installer'
+      - uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: installer-linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          overwrite: true
+          name: gui-checks-linux
+          path: installer/test-results/
+
+  release:
+    name: Publish verified Installer release
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [checks, windows, macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-windows
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-macos
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-linux
+          path: dist
+      - name: Verify complete asset set and generate checksums
+        run: node installer/scripts/prepareReleaseFiles.cjs
+      - name: Save complete release files
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          name: installer-release-files
+          path: |
+            dist/Velron-Installer-windows-x64.exe
+            dist/Velron-Installer-windows-arm64.exe
+            dist/Velron-Installer-macos-universal.zip
+            dist/Velron-Installer-linux.tar.gz
+            dist/SHA256SUMS-installers.txt
+          if-no-files-found: error
+      - name: Upload a draft, verify every asset, then publish Latest
+        run: node installer/scripts/publishRelease.cjs
+        env:
+          GH_TOKEN: ${{ github.token }}

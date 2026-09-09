@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="1000" height="1000" role="img" aria-labelledby="title description" shape-rendering="geometricPrecision">
+  <title id="title">Centered white V logo</title>
+  <desc id="description">A white geometric V, centered at 54 percent canvas width on a square #3355CC background.</desc>
+  <rect width="1000" height="1000" rx="180" fill="#3355CC" />
+  <g transform="translate(500 500) scale(0.45) translate(-600 -866.025404)">
+    <path fill="#FFFFFF" d="     M 0 346.410162     L 200 461.880215     L 200 651.880215     L 200 911.688     L 600 1142.628108     L 600 1385.640646     L 0 1039.230485     Z" />
+    <path fill="#FFFFFF" d="     M 1200 346.410162     L 1000 461.880215     L 1000 651.880215     L 1000 911.688     L 600 1142.628108     L 600 1385.640646     L 1200 1039.230485     Z" />
+  </g>
+</svg>
