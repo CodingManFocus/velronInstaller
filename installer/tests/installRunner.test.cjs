@@ -36,15 +36,17 @@ test('streams progress, redacts a token split across chunks, and never uses a sh
   assert.equal(runner.running, false);
 });
 
-test('Windows uses system PowerShell with hidden window and settings outside the command line', async () => {
+test('Windows resolves powershell through PATH with hidden window and settings outside the command line', async () => {
   let launched;
   const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
-  const runner = createInstallRunner({ engineDir: 'C:\\App\\engine', platform: 'win32', environment: { SystemRoot: 'C:\\Windows' },
+  const runner = createInstallRunner({ engineDir: 'C:\\App\\engine', platform: 'win32', environment: { PATH: 'C:\\PowerShell' },
     onEvent: () => {}, spawnProcess: (...args) => { launched = args; return child; } });
   const promise = runner.run(getDefaults('win32', 'C:\\Users\\Focus', {}));
   child.stdout.end(); child.stderr.end(); child.emit('close', 0);
   assert.equal((await promise).status, 'success');
-  assert.equal(launched[0], 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+  assert.equal(launched[0], 'powershell');
+  assert.equal(launched[2].env.PATH, 'C:\\PowerShell');
+  assert.equal(launched[2].shell, false);
   assert.ok(launched[1].includes('-File'));
   assert.equal(launched[2].windowsHide, true);
   assert.ok(!launched[1].join(' ').includes('Users'));

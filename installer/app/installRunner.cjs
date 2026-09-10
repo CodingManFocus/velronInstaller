@@ -35,8 +35,7 @@ function createInstallRunner({ engineDir, onEvent, platform = process.platform, 
       cancelRequested = false;
       const windows = platform === 'win32';
       const targetPaths = windows ? path.win32 : path.posix;
-      if (windows && !environment.SystemRoot) throw new Error('Windows PowerShell could not be located.');
-      const command = windows ? path.win32.join(environment.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : '/bin/sh';
+      const command = windows ? 'powershell' : '/bin/sh';
       const args = windows
         ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', targetPaths.join(engineDir, 'install.ps1'), '-NonInteractive']
         : [targetPaths.join(engineDir, 'install.sh'), '--non-interactive'];
@@ -72,7 +71,7 @@ function createInstallRunner({ engineDir, onEvent, platform = process.platform, 
       cancelRequested = true;
       const pid = child.pid;
       if (platform === 'win32') {
-        const killer = spawnProcess(path.win32.join(environment.SystemRoot, 'System32', 'taskkill.exe'),
+        const killer = spawnProcess(environment.SystemRoot ? path.win32.join(environment.SystemRoot, 'System32', 'taskkill.exe') : 'taskkill',
           ['/PID', String(pid), '/T', '/F'], { windowsHide: true, shell: false, stdio: 'ignore' });
         killer.on('error', error => emitLine(error.message));
       } else if (pid) {
