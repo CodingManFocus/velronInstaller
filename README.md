@@ -113,6 +113,13 @@ Server and Client builds for Windows, macOS, and Linux on x64 and ARM64, plus
 Installer releases live separately in [velronInstaller](https://github.com/CodingManFocus/velronInstaller/releases/latest).
 Each repository's Latest release therefore identifies only its own product.
 
+Server installations also look for the optional `Velron-Status-<platform>-<architecture>`
+desktop companion in that application release: `.zip` on Windows and `.tar.gz` on macOS/Linux,
+with a separate `SHA256SUMS-desktop.txt`. It adds a status window to compatible Server builds.
+The Server command, configuration, MCP connections, and startup registration keep their existing
+behavior. A missing or invalid companion reports a warning and does not fail Server installation;
+Linux installations without a desktop session skip the companion.
+
 ## Development and releases
 
 The initial source was migrated from `CodingManFocus/velronRelease` at

@@ -93,6 +93,59 @@ try {
             throw 'Transaction left staging or backup files after successful rollback.'
         }
     } finally { Remove-Item Function:\Move-Item }
+    if ($env:OS -eq 'Windows_NT') {
+        # Install a real, local ZIP through the optional companion helper. The
+        # network adapter alone is mocked; checksum, extraction and publication run.
+        $script:desktopDownloads = Join-Path $fixture 'desktop-downloads'
+        $desktopSource = Join-Path $fixture 'desktop-source'
+        $desktopTemporary = Join-Path $fixture 'desktop-temporary'
+        $desktopState = Join-Path $fixture 'desktop-state'
+        foreach ($directory in @($script:desktopDownloads, $desktopSource, $desktopTemporary, $desktopState)) {
+            [IO.Directory]::CreateDirectory($directory) | Out-Null
+        }
+        $script:latestBaseUrl = 'https://example.test/releases/latest/download'
+        $script:utf8NoBom = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllText((Join-Path $desktopSource 'Velron Status.exe'), 'status-fixture')
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $desktopArchive = Join-Path $script:desktopDownloads 'Velron-Status-windows-x64.zip'
+        [IO.Compression.ZipFile]::CreateFromDirectory($desktopSource, $desktopArchive)
+        $desktopHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $desktopArchive).Hash.ToLowerInvariant()
+        $desktopSums = Join-Path $script:desktopDownloads 'SHA256SUMS-desktop.txt'
+        [IO.File]::WriteAllText($desktopSums, "$desktopHash  Velron-Status-windows-x64.zip`n")
+        function Invoke-WebRequest {
+            param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile)
+            $assetFile = ([Uri]$Uri).Segments[-1]
+            Copy-Item -LiteralPath (Join-Path $script:desktopDownloads $assetFile) -Destination $OutFile
+        }
+        try {
+            Install-DesktopStatus $desktopState x64 $desktopTemporary
+            $descriptorPath = Join-Path $desktopState 'desktop/status.json'
+            $before = [IO.File]::ReadAllText($descriptorPath)
+            $descriptor = $before | ConvertFrom-Json
+            $expected = Join-Path $desktopState "desktop/$desktopHash/Velron Status.exe"
+            if ($descriptor.schemaVersion -ne 1 -or $descriptor.executable -ne $expected -or
+                [IO.File]::ReadAllText($expected) -ne 'status-fixture') { throw 'Status window installation failed.' }
+            $desktopAcl = Get-Acl -LiteralPath (Join-Path $desktopState 'desktop')
+            if (-not $desktopAcl.AreAccessRulesProtected) { throw 'Status window directory is not private.' }
+            # Reinstallation uses the same immutable version and atomically replaces the descriptor.
+            Install-DesktopStatus $desktopState x64 $desktopTemporary
+            if ([IO.File]::ReadAllText($descriptorPath) -ne $before) { throw 'Status reinstallation changed its descriptor.' }
+            [IO.File]::WriteAllText($desktopSums, "$('0' * 64)  Velron-Status-windows-x64.zip`n")
+            Install-DesktopStatus $desktopState x64 $desktopTemporary
+            if ([IO.File]::ReadAllText($descriptorPath) -ne $before) { throw 'Checksum failure changed the previous status window.' }
+            Remove-Item -LiteralPath $desktopSums
+            Install-DesktopStatus $desktopState x64 $desktopTemporary
+            if ([IO.File]::ReadAllText($descriptorPath) -ne $before) { throw 'Missing archive changed the previous status window.' }
+            $unsafeArchivePath = Join-Path $desktopTemporary 'unsafe.zip'
+            $unsafeArchive = [IO.Compression.ZipFile]::Open($unsafeArchivePath, [IO.Compression.ZipArchiveMode]::Create)
+            try { $unsafeArchive.CreateEntry('../escape.txt') | Out-Null } finally { $unsafeArchive.Dispose() }
+            $rejected = $false
+            try { Expand-DesktopArchive $unsafeArchivePath (Join-Path $desktopTemporary 'unsafe') } catch { $rejected = $true }
+            if (-not $rejected -or (Test-Path -LiteralPath (Join-Path $desktopTemporary 'escape.txt'))) {
+                throw 'Status archive traversal was not rejected.'
+            }
+        } finally { Remove-Item Function:\Invoke-WebRequest }
+    }
     Write-Output 'PowerShell syntax, GUI settings, local mode, config preservation, and invalid input checks passed.'
 } finally {
     foreach ($name in $originalEnvironment.Keys) {

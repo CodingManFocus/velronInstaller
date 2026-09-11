@@ -37,6 +37,21 @@ Server and Client processes before upgrading. The Installer reports a locked exe
 preserves/restores the previous binaries where the OS permits; it does not forcibly terminate
 running applications to replace them.
 
+After the existing runtime/configuration/MCP installation steps, Server installations optionally
+download a status companion from the same application release location. The six assets are
+`Velron-Status-windows-{x64,arm64}.zip`, `Velron-Status-macos-{x64,arm64}.tar.gz`, and
+`Velron-Status-linux-{x64,arm64}.tar.gz`; `SHA256SUMS-desktop.txt` verifies these independently of
+the existing Server/Client manifest. They must be included when manually mirroring a compatible
+Velron release to `velronRelease`. The Installer workflow does not publish these application assets.
+
+Verified status files live in a private `<Velron home>/desktop/<archive SHA-256>/` directory.
+Only a successful extraction publishes `desktop/status.json` atomically; an existing status app
+and descriptor are preserved if the optional download fails. Previous version directories are
+kept so a running window is never overwritten. Linux headless and Client-only installs skip this
+step. On macOS/Linux, the Installer can show the observer from its desktop session after the
+existing service readiness check, without changing systemd/LaunchAgent environment or commands.
+The observer does not start, stop, restart, or reconfigure the Server.
+
 When immediate startup is selected, success requires a live Server process/service and the expected
 unauthenticated management response. This checks management listener readiness; it does not test
 configured model providers. Startup failures point to `server-error.log`, `server.log`, or the user

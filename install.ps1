@@ -230,6 +230,114 @@ function Get-VerifiedAsset([string]$AssetName, [string]$ChecksumsPath, [string]$
     return $downloadPath
 }
 
+function Expand-DesktopArchive([string]$ArchivePath, [string]$Destination) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        $root = [IO.Path]::GetFullPath($Destination).TrimEnd('\') + '\'
+        $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        # Validate every entry before writing any files. Windows packages contain
+        # ordinary files only; links and special files are never needed.
+        foreach ($entry in $archive.Entries) {
+            $name = $entry.FullName
+            if (-not $name -or $name.StartsWith('/') -or $name -match '[\\<>:"|?*\x00-\x1f]') { throw 'Unsafe status window archive path.' }
+            foreach ($part in $name.TrimEnd('/').Split('/')) {
+                if (-not $part -or $part -in @('.', '..') -or $part -match '[ .]$' -or
+                    $part -match '^(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)') { throw 'Unsafe status window archive path.' }
+            }
+            $mode = ($entry.ExternalAttributes -shr 16) -band 0xf000
+            if ($mode -notin @(0, 0x8000, 0x4000) -or ($entry.ExternalAttributes -band [int][IO.FileAttributes]::ReparsePoint)) {
+                throw 'Links and special files are not supported in the Windows status window archive.'
+            }
+            $destinationPath = [IO.Path]::GetFullPath((Join-Path $Destination ($name.Replace('/', '\')))).TrimEnd('\')
+            if (-not $destinationPath.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or -not $seen.Add($destinationPath)) {
+                throw 'Unsafe or duplicate status window archive path.'
+            }
+        }
+        foreach ($entry in $archive.Entries) {
+            $destinationPath = Join-Path $Destination ($entry.FullName.Replace('/', '\'))
+            if ($entry.FullName.EndsWith('/')) {
+                [IO.Directory]::CreateDirectory($destinationPath) | Out-Null
+            } else {
+                [IO.Directory]::CreateDirectory((Split-Path -Parent $destinationPath)) | Out-Null
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destinationPath, $false)
+            }
+        }
+    } finally { $archive.Dispose() }
+}
+
+function Install-DesktopStatus([string]$StateHome, [string]$Architecture, [string]$TemporaryDirectory) {
+    $stagingDirectory = $null
+    $descriptorTemporary = $null
+    try {
+        $assetName = "Velron-Status-windows-$Architecture.zip"
+        $sumsPath = Join-Path $TemporaryDirectory 'SHA256SUMS-desktop.txt'
+        $archivePath = Join-Path $TemporaryDirectory $assetName
+        Write-Info 'Downloading the optional Velron status window...'
+        Invoke-WebRequest -UseBasicParsing -Uri "$script:latestBaseUrl/SHA256SUMS-desktop.txt" -OutFile $sumsPath
+        $matchingLines = @(Get-Content -LiteralPath $sumsPath | Where-Object {
+            $_ -match "^[0-9a-fA-F]{64}\s+\*?$([regex]::Escape($assetName))$"
+        })
+        if ($matchingLines.Count -ne 1) { throw "Expected exactly one checksum for $assetName." }
+        $hash = ($matchingLines[0] -split '\s+')[0].ToLowerInvariant()
+        Invoke-WebRequest -UseBasicParsing -Uri "$script:latestBaseUrl/$assetName" -OutFile $archivePath
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant() -ne $hash) {
+            throw 'Status window archive checksum did not match.'
+        }
+        $desktopRoot = Join-Path $StateHome 'desktop'
+        if ((Test-Path -LiteralPath $desktopRoot) -and ((Get-Item -LiteralPath $desktopRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'The status window directory cannot be a link or junction.'
+        }
+        [IO.Directory]::CreateDirectory($desktopRoot) | Out-Null
+        $acl = [Security.AccessControl.DirectorySecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        foreach ($identity in @([Security.Principal.WindowsIdentity]::GetCurrent().User, [Security.Principal.SecurityIdentifier]::new('S-1-5-18'))) {
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                $identity, [Security.AccessControl.FileSystemRights]::FullControl, $inheritance,
+                [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow
+            ))
+        }
+        Set-Acl -LiteralPath $desktopRoot -AclObject $acl
+        $stagingDirectory = Join-Path $desktopRoot ".install.$([guid]::NewGuid().ToString('N'))"
+        [IO.Directory]::CreateDirectory($stagingDirectory) | Out-Null
+        Expand-DesktopArchive $archivePath $stagingDirectory
+        if (-not (Test-Path -LiteralPath (Join-Path $stagingDirectory 'Velron Status.exe') -PathType Leaf)) {
+            throw 'The status window executable is missing from its archive.'
+        }
+        $versionDirectory = Join-Path $desktopRoot $hash
+        if (Test-Path -LiteralPath $versionDirectory) {
+            $existing = Get-Item -LiteralPath $versionDirectory -Force
+            if (-not $existing.PSIsContainer -or ($existing.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'The status window version directory is not a regular directory.'
+            }
+        } else { [IO.Directory]::Move($stagingDirectory, $versionDirectory) }
+        $executable = Join-Path $versionDirectory 'Velron Status.exe'
+        if (-not (Test-Path -LiteralPath $executable -PathType Leaf) -or
+            ((Get-Item -LiteralPath $executable -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'The installed status window executable is not a regular file.'
+        }
+        $descriptorPath = Join-Path $desktopRoot 'status.json'
+        if ((Test-Path -LiteralPath $descriptorPath) -and
+            ((Get-Item -LiteralPath $descriptorPath -Force).Attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint))) {
+            throw 'The status window descriptor is not a regular file.'
+        }
+        $descriptorTemporary = Join-Path $desktopRoot "status.json.tmp.$([guid]::NewGuid().ToString('N'))"
+        $descriptor = [ordered]@{ schemaVersion = 1; executable = $executable }
+        [IO.File]::WriteAllText($descriptorTemporary, (($descriptor | ConvertTo-Json) + "`n"), $script:utf8NoBom)
+        # Publish atomically after extraction succeeds; retain the previous app
+        # and descriptor on every optional download/verification/install failure.
+        if (Test-Path -LiteralPath $descriptorPath) { [IO.File]::Replace($descriptorTemporary, $descriptorPath, $null) }
+        else { [IO.File]::Move($descriptorTemporary, $descriptorPath) }
+        Write-Success 'Installed the Velron status window'
+    } catch {
+        Write-WarningMessage "The optional status window could not be installed. Server installation will continue normally; any previous status window is preserved. $($_.Exception.Message)"
+    } finally {
+        if ($stagingDirectory -and (Test-Path -LiteralPath $stagingDirectory)) { Remove-Item -LiteralPath $stagingDirectory -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($descriptorTemporary -and (Test-Path -LiteralPath $descriptorTemporary)) { Remove-Item -LiteralPath $descriptorTemporary -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Install-StagedAssets([object[]]$Assets) {
     $changed = [Collections.Generic.List[object]]::new()
     try {
@@ -613,6 +721,7 @@ try {
     }
 
     if ($installServer) {
+        Install-DesktopStatus $velronHome $architectureName $temporaryDirectory
         Write-Stage 'startup'
         if ($enableAutostart) {
             Install-StartupShortcut $serverPath $installDirectory
