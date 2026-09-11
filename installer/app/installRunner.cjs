@@ -1,6 +1,5 @@
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const readline = require('node:readline');
 const { toEnvironment } = require('./installOptions.cjs');
 
 function createInstallRunner({ engineDir, onEvent, platform = process.platform, spawnProcess = spawn, environment = process.env }) {
@@ -10,6 +9,7 @@ function createInstallRunner({ engineDir, onEvent, platform = process.platform, 
   let warnings = [];
   let secret = '';
   let killTimer;
+  let engineExited = false;
 
   function emitLine(value) {
     const clean = value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trim();
@@ -33,6 +33,7 @@ function createInstallRunner({ engineDir, onEvent, platform = process.platform, 
       warnings = [];
       secret = options.vcpToken;
       cancelRequested = false;
+      engineExited = false;
       const windows = platform === 'win32';
       const targetPaths = windows ? path.win32 : path.posix;
       const command = windows ? 'powershell' : '/bin/sh';
@@ -45,15 +46,36 @@ function createInstallRunner({ engineDir, onEvent, platform = process.platform, 
       return new Promise(resolve => {
         child = spawnProcess(command, args, { env, cwd: engineDir, windowsHide: true,
           shell: false, detached: !windows, stdio: ['ignore', 'pipe', 'pipe'] });
-        for (const stream of [child.stdout, child.stderr]) {
+        const streams = [child.stdout, child.stderr];
+        const readers = streams.map(stream => {
           stream.setEncoding('utf8');
-          readline.createInterface({ input: stream, crlfDelay: Infinity }).on('line', emitLine);
-        }
+          let pending = '';
+          function read(chunk) {
+            const lines = (pending + chunk).split(/\r\n|\r|\n/);
+            pending = lines.pop();
+            for (const line of lines) emitLine(line);
+          }
+          stream.on('data', read);
+          return () => {
+            stream.removeListener('data', read);
+            if (pending) emitLine(pending);
+          };
+        });
         let finished = false;
+        let drainTimer;
         function finish(code, error) {
           if (finished) return;
           finished = true;
           clearTimeout(killTimer);
+          clearTimeout(drainTimer);
+          // Flush unterminated diagnostics before clearing this run's secret.
+          for (const closeReader of readers) closeReader();
+          for (const stream of streams) {
+            // Keep draining inherited pipes without keeping the Installer alive or
+            // breaking a still-running descendant's output with a closed pipe.
+            stream.resume();
+            stream.unref?.();
+          }
           if (error) emitLine(error.message);
           const result = { status: cancelRequested ? 'cancelled' : code === 0 ? 'success' : 'failed',
             exitCode: code, warnings: [...warnings] };
@@ -63,11 +85,20 @@ function createInstallRunner({ engineDir, onEvent, platform = process.platform, 
           resolve(result);
         }
         child.once('error', error => finish(null, error));
+        child.once('exit', code => {
+          if (finished) return;
+          engineExited = true;
+          clearTimeout(killTimer);
+          // `close` also waits for descendants that inherited stdout/stderr.
+          // Allow final diagnostics to drain, but only wait a bounded time after
+          // the installation engine itself has exited. Its exit code is final.
+          drainTimer = setTimeout(() => finish(code), 1000);
+        });
         child.once('close', code => finish(code));
       });
     },
     cancel() {
-      if (!child) return;
+      if (!child || engineExited) return;
       cancelRequested = true;
       const pid = child.pid;
       if (platform === 'win32') {
