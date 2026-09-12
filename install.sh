@@ -360,159 +360,6 @@ verify_asset() {
   success "Verified $verify_name"
 }
 
-# The status window is optional. Its private descriptor is the only connection to
-# the Server; installation never changes the Server command or its lifecycle.
-install_desktop_status() (
-  if [ "$OS_NAME" = linux ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
-    info "No desktop session detected; keeping the normal headless Server installation."
-    return 0
-  fi
-  desktop_asset="Velron-Status-$OS_NAME-$ARCH_NAME.tar.gz"
-  desktop_sums="$TEMP_DIR/SHA256SUMS-desktop.txt"
-  desktop_archive="$TEMP_DIR/$desktop_asset"
-  info "Downloading the optional Velron status window..."
-  download "$LATEST_BASE_URL/SHA256SUMS-desktop.txt" "$desktop_sums" || return 1
-  # Require exactly one complete checksum entry for this archive.
-  desktop_hash=$(awk -v name="$desktop_asset" '
-    NF == 2 && ($2 == name || $2 == "*" name) {
-      if (length($1) != 64 || $1 ~ /[^0-9a-fA-F]/) exit 1
-      count++; hash=tolower($1)
-    }
-    END { if (count != 1) exit 1; print hash }
-  ' "$desktop_sums") || return 1
-  download "$LATEST_BASE_URL/$desktop_asset" "$desktop_archive" || return 1
-  desktop_actual=$(sha256_file "$desktop_archive") || return 1
-  [ "$desktop_actual" = "$desktop_hash" ] || { warn "Status window archive checksum did not match."; return 1; }
-  command -v tar >/dev/null 2>&1 || return 1
-  LC_ALL=C tar -tzf "$desktop_archive" >"$TEMP_DIR/desktop-paths" || return 1
-  LC_ALL=C tar -tvzf "$desktop_archive" >"$TEMP_DIR/desktop-entries" || return 1
-  # Validate the complete link graph before extracting. Framework symlinks in a
-  # macOS app are supported, while traversal, hard links and special files fail.
-  awk '
-    function invalid(p) { return p ~ /^[\/]/ || p ~ /[\\[:cntrl:]]/ || p ~ /(^|\/)\.\.?(\/|$)/ }
-    function resolve(p,    pending,parts,count,part,current,depth,links,i,stack) {
-      pending=p; depth=0; links=0
-      while (pending != "") {
-        count=split(pending,parts,"/"); part=parts[1]
-        pending=""; for (i=2;i<=count;i++) pending=pending (i==2 ? "" : "/") parts[i]
-        if (part=="" || part==".") continue
-        if (part=="..") { if (depth==0) return 0; delete stack[depth--]; continue }
-        stack[++depth]=part; current=stack[1]
-        for (i=2;i<=depth;i++) current=current "/" stack[i]
-        if (kinds[current]=="l") {
-          if (++links>64) return 0
-          delete stack[depth--]
-          pending=targets[current] (pending=="" ? "" : "/" pending)
-        }
-      }
-      return 1
-    }
-    FNR==NR {
-      p=$0; sub(/^\.\//,"",p); sub(/\/$/,"",p)
-      if (p==".") p=""
-      if (invalid(p) || p ~ / -> / || (p!="" && seen[p]++)) exit 1
-      names[FNR]=p; total=FNR; next
-    }
-    {
-      if (FNR>total) exit 1
-      p=names[FNR]; kind=substr($0,1,1)
-      if (kind!="-" && kind!="d" && kind!="l") exit 1
-      kinds[p]=kind
-      if (kind=="l") {
-        marker=index($0," -> "); if (!marker) exit 1
-        target=substr($0,marker+4)
-        if (target=="" || target ~ /^[\/]/ || target ~ /[\\[:cntrl:]]/) exit 1
-        targets[p]=target
-      }
-      processed=FNR
-    }
-    END {
-      if (!total || processed!=total) exit 1
-      for (p in kinds) {
-        parent=p
-        while (parent ~ /\//) {
-          sub(/\/[^\/]*$/,"",parent)
-          if (kinds[parent]=="l") exit 1
-        }
-        if (kinds[p]=="l" && !resolve(p)) exit 1
-      }
-    }
-  ' "$TEMP_DIR/desktop-paths" "$TEMP_DIR/desktop-entries" || return 1
-  umask 077
-  desktop_root="$VELRON_HOME_PATH/desktop"
-  [ ! -L "$desktop_root" ] || return 1
-  mkdir -p "$desktop_root" || return 1
-  chmod 700 "$desktop_root" || return 1
-  desktop_final="$desktop_root/$desktop_hash"
-  desktop_stage=$(mktemp -d "$desktop_root/.install.XXXXXX") || return 1
-  desktop_descriptor_tmp="$desktop_root/status.json.tmp.$$"
-  desktop_installed=false
-  trap 'rm -rf "$desktop_stage"; rm -f "$desktop_descriptor_tmp"; [ "$desktop_installed" = true ] || rm -f "$TEMP_DIR/desktop-executable"' EXIT
-  if [ "$OS_NAME" = macos ]; then
-    desktop_relative='Velron Status.app/Contents/MacOS/Velron Status'
-  else
-    desktop_relative='velron-status'
-  fi
-  tar -xzf "$desktop_archive" --no-same-owner --no-same-permissions -C "$desktop_stage" || return 1
-  [ -f "$desktop_stage/$desktop_relative" ] && [ ! -L "$desktop_stage/$desktop_relative" ] || return 1
-  desktop_stage_real=$(cd -P "$desktop_stage" && pwd -P) || return 1
-  desktop_parent=$(cd -P "$(dirname "$desktop_stage/$desktop_relative")" && pwd -P) || return 1
-  case "$desktop_parent/" in "$desktop_stage_real/"*) ;; *) return 1 ;; esac
-  chmod 755 "$desktop_stage/$desktop_relative" || return 1
-  if [ -e "$desktop_final" ] || [ -L "$desktop_final" ]; then
-    [ -d "$desktop_final" ] && [ ! -L "$desktop_final" ] || return 1
-  else
-    mv "$desktop_stage" "$desktop_final" || return 1
-  fi
-  [ -f "$desktop_final/$desktop_relative" ] && [ -x "$desktop_final/$desktop_relative" ] && [ ! -L "$desktop_final/$desktop_relative" ] || return 1
-  desktop_final_real=$(cd -P "$desktop_final" && pwd -P) || return 1
-  desktop_parent=$(cd -P "$(dirname "$desktop_final/$desktop_relative")" && pwd -P) || return 1
-  case "$desktop_parent/" in "$desktop_final_real/"*) ;; *) return 1 ;; esac
-  [ ! -d "$desktop_root/status.json" ] && [ ! -L "$desktop_root/status.json" ] || return 1
-  printf '{"schemaVersion":1,"executable":"%s"}\n' "$(json_escape "$desktop_final/$desktop_relative")" >"$desktop_descriptor_tmp" || return 1
-  chmod 600 "$desktop_descriptor_tmp" || return 1
-  printf '%s\n' "$desktop_final/$desktop_relative" >"$TEMP_DIR/desktop-executable" || return 1
-  mv -f "$desktop_descriptor_tmp" "$desktop_root/status.json" || return 1
-  desktop_installed=true
-  success "Installed the Velron status window"
-)
-
-show_service_desktop_status() (
-  # Service managers may not inherit the Installer desktop session. Show the
-  # same observer from this session after the existing readiness check succeeds.
-  case "${AUTOSTART_KIND:-}" in systemd|launchd) ;; *) return 0 ;; esac
-  [ "$OS_NAME" != linux ] || [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || return 0
-  [ -z "${CI:-}${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}" ] || return 0
-  [ -f "$TEMP_DIR/desktop-executable" ] || return 0
-  IFS= read -r desktop_executable <"$TEMP_DIR/desktop-executable" || return 1
-  [ -x "$desktop_executable" ] && [ ! -L "$desktop_executable" ] || return 1
-  desktop_marker_path="$VELRON_HOME_PATH/server-instance.lock"
-  [ -f "$desktop_marker_path" ] && [ ! -L "$desktop_marker_path" ] || return 1
-  [ "$(wc -c <"$desktop_marker_path")" -le 4096 ] || return 1
-  desktop_marker=$(cat "$desktop_marker_path") || return 1
-  desktop_schema=$(printf '%s' "$desktop_marker" | sed -n 's/.*"schemaVersion"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
-  desktop_pid=$(printf '%s' "$desktop_marker" | sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
-  desktop_instance=$(printf '%s' "$desktop_marker" | sed -n 's/.*"instanceId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-  [ "$desktop_schema" = 2 ] || return 1
-  case "$desktop_pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$desktop_pid" -gt 0 ] && [ "$desktop_pid" -le 2147483647 ] || return 1
-  printf '%s\n' "$desktop_instance" | awk '/^[0-9a-fA-F-]+$/ && length($0)==36 { valid=1 } END { exit !valid }' || return 1
-  kill -0 "$desktop_pid" 2>/dev/null || return 1
-  desktop_host=${readiness_host#\[}; desktop_host=${desktop_host%\]}
-  valid_host "$desktop_host" bind && valid_port "$readiness_port" || return 1
-  # Sanitize only this observer subshell. Server and Installer environments stay
-  # intact, while inherited Node/Electron flags cannot override the GUI runtime.
-  desktop_environment_names=$(env | awk -F= '
-    $1 ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && toupper($1) ~ /^(NODE_OPTIONS|NODE_PATH|ELECTRON_.*)$/ { print $1 }
-  ') || return 1
-  for desktop_environment_name in $desktop_environment_names; do
-    unset "$desktop_environment_name"
-  done
-  nohup "$desktop_executable" --velron-home "$VELRON_HOME_PATH" --server-pid "$desktop_pid" \
-    --instance-id "$desktop_instance" --server-host "$desktop_host" --server-port "$readiness_port" \
-    </dev/null >/dev/null 2>&1 &
-)
-
 trim() {
   printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
 }
@@ -1001,7 +848,6 @@ EOF
 fi
 
 if [ "$INSTALL_SERVER" = true ]; then
-  install_desktop_status || warn "The optional status window could not be installed. Server installation will continue normally; any previous status window is preserved."
   stage startup
   if [ "$ENABLE_AUTOSTART" = true ]; then
     configure_autostart "$SERVER_COMMAND"
@@ -1021,7 +867,6 @@ if [ "$INSTALL_SERVER" = true ]; then
       STARTED_SERVER_PID=$!
     fi
     wait_server_ready
-    show_service_desktop_status || warn "The Server is ready, but its optional status window could not be opened in this desktop session."
     success "Velron Server is responding and authentication is ready"
     info "Management token file (private): $VELRON_HOME_PATH/management-token"
   fi
