@@ -529,6 +529,8 @@ EOF
       desktop_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
       mkdir -p "$desktop_dir"
       # Exec has both desktop-string and argument quoting layers.
+      # Dollar signs and backticks are literal desktop-entry characters here.
+      # shellcheck disable=SC2016
       escaped_exec=$(printf '%s' "$autostart_command" | sed 's/\\/\\\\\\\\/g; s/"/\\\\"/g; s/`/\\\\`/g; s/\$/\\\\$/g; s/%/%%/g')
       cat >"$desktop_dir/velron.desktop" <<EOF
 [Desktop Entry]

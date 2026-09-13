@@ -14,7 +14,8 @@ test('finishes after engine exit while an auto-started process keeps both output
   const pidFile = path.join(directory, 'server.pid');
   t.after(async () => {
     try { process.kill(Number(await fs.readFile(pidFile, 'utf8'))); } catch { /* Already exited. */ }
-    await fs.rm(directory, { recursive: true, force: true });
+    // Windows can retain the child's working-directory handle briefly after termination.
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
   const fixture = path.join(directory, 'engine.cjs');
   await fs.writeFile(fixture, `
