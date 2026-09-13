@@ -150,7 +150,53 @@ function Assert-StateHome([string]$StateHome, [string]$CommandDirectory) {
     }
 }
 
-function Wait-ServerReady([Diagnostics.Process]$Process, [string]$StateHome) {
+function Invoke-ServerCommand([string]$ServerPath, [string]$Argument, [int]$TimeoutSeconds = 15) {
+    $commandProcess = [Diagnostics.Process]::new()
+    $commandProcess.StartInfo = [Diagnostics.ProcessStartInfo]::new()
+    $commandProcess.StartInfo.FileName = $ServerPath
+    $commandProcess.StartInfo.Arguments = $Argument
+    $commandProcess.StartInfo.WorkingDirectory = Split-Path -Parent $ServerPath
+    $commandProcess.StartInfo.UseShellExecute = $false
+    $commandProcess.StartInfo.CreateNoWindow = $true
+    $commandProcess.StartInfo.RedirectStandardOutput = $true
+    $commandProcess.StartInfo.RedirectStandardError = $true
+    try {
+        if (-not $commandProcess.Start()) { throw 'Could not launch Velron command.' }
+        $outputTask = $commandProcess.StandardOutput.ReadToEndAsync()
+        $errorTask = $commandProcess.StandardError.ReadToEndAsync()
+        if (-not $commandProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            $commandProcess.Kill()
+            throw "Velron $Argument timed out. Check velron status and velron stream."
+        }
+        if (-not $outputTask.Wait(1000) -or -not $errorTask.Wait(1000)) {
+            throw "Velron $Argument did not close its output streams."
+        }
+        if ($commandProcess.ExitCode -ne 0) {
+            throw "Velron $Argument failed (exit $($commandProcess.ExitCode)). Check velron status and velron stream."
+        }
+        # Output can contain a private Management URL. Never send it to GUI logs.
+        return $outputTask.Result
+    } finally { $commandProcess.Dispose() }
+}
+
+function Test-ServerCommands([string]$ServerPath) {
+    $helpText = Invoke-ServerCommand $ServerPath '--help'
+    return $helpText -cmatch '(?m)^Usage: velron \[on\|off\|status\|stream\|run\]\r?$'
+}
+
+function Assert-ServerRunning([string]$ServerPath) {
+    $statusText = Invoke-ServerCommand $ServerPath 'status'
+    if ($statusText -cnotmatch '(?m)^Velron is running \((background|foreground), PID [0-9]+\)\.\r?$') {
+        throw 'Velron Server is not confirmed running. Check velron status and velron stream.'
+    }
+}
+
+function Start-ManagedServer([string]$ServerPath) {
+    Invoke-ServerCommand $ServerPath 'on' 130 | Out-Null
+    Assert-ServerRunning $ServerPath
+}
+
+function Wait-ServerReady([Diagnostics.Process]$Process, [string]$StateHome, [string]$ServerPath = '') {
     $settings = Get-Content -Raw -LiteralPath (Join-Path $StateHome 'config.json') | ConvertFrom-Json
     Assert-ServerHost $settings.host
     $bindHost = $settings.host
@@ -159,8 +205,10 @@ function Wait-ServerReady([Diagnostics.Process]$Process, [string]$StateHome) {
     if ($bindHost.Contains(':')) { $bindHost = "[$bindHost]" }
     $uri = "http://${bindHost}:$($settings.port)/api/health"
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
-        $Process.Refresh()
-        if ($Process.HasExited) { throw "Velron Server exited before becoming ready. Check $StateHome\server-error.log and server.log." }
+        if ($Process) {
+            $Process.Refresh()
+            if ($Process.HasExited) { throw "Velron Server exited before becoming ready. Check $StateHome\server-error.log and server.log." }
+        }
         $response = $null; $reader = $null; $ready = $false
         try {
             $request = [Net.HttpWebRequest]::Create($uri)
@@ -186,8 +234,11 @@ function Wait-ServerReady([Diagnostics.Process]$Process, [string]$StateHome) {
         }
         if ($ready) {
             Start-Sleep -Seconds 1
-            $Process.Refresh()
-            if ($Process.HasExited) { throw "Velron Server exited. Check $StateHome\server-error.log." }
+            if ($Process) {
+                $Process.Refresh()
+                if ($Process.HasExited) { throw "Velron Server exited. Check $StateHome\server-error.log." }
+            }
+            if ($ServerPath) { Assert-ServerRunning $ServerPath }
             return
         }
         Start-Sleep -Seconds 1
@@ -294,16 +345,21 @@ function Set-OptionalUserEnvironment([string]$Name, [string]$Value) {
     }
 }
 
-function Install-StartupShortcut([string]$ServerPath, [string]$WorkingDirectory) {
+function Set-StartupShortcutCommand($Shortcut, [string]$ServerPath, [string]$WorkingDirectory, [bool]$ServerCommands) {
+    $Shortcut.TargetPath = $ServerPath
+    $Shortcut.WorkingDirectory = $WorkingDirectory
+    $Shortcut.Arguments = if ($ServerCommands) { 'on' } else { '' }
+    $Shortcut.Description = 'Start Velron Server when signing in'
+    $Shortcut.Save()
+}
+
+function Install-StartupShortcut([string]$ServerPath, [string]$WorkingDirectory, [bool]$ServerCommands) {
     $startupDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
     [IO.Directory]::CreateDirectory($startupDirectory) | Out-Null
     $shortcutPath = Join-Path $startupDirectory 'Velron Server.lnk'
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $ServerPath
-    $shortcut.WorkingDirectory = $WorkingDirectory
-    $shortcut.Description = 'Start Velron Server when signing in'
-    $shortcut.Save()
+    Set-StartupShortcutCommand $shortcut $ServerPath $WorkingDirectory $ServerCommands
     Write-Success 'Registered Velron Server in Startup'
 }
 
@@ -614,21 +670,27 @@ try {
 
     if ($installServer) {
         Write-Stage 'startup'
+        $serverCommands = Test-ServerCommands $serverPath
         if ($enableAutostart) {
-            Install-StartupShortcut $serverPath $installDirectory
+            Install-StartupShortcut $serverPath $installDirectory $serverCommands
         } else {
             Remove-StartupShortcut
             Write-Info 'Velron Server autostart is disabled'
         }
         if ($startServerNow) {
-            $startArguments = @{
-                FilePath = $serverPath; WorkingDirectory = $installDirectory; PassThru = $true
-                RedirectStandardOutput = (Join-Path $velronHome 'server.log')
-                RedirectStandardError = (Join-Path $velronHome 'server-error.log')
+            if ($serverCommands) {
+                Start-ManagedServer $serverPath
+                Wait-ServerReady $null $velronHome $serverPath
+            } else {
+                $startArguments = @{
+                    FilePath = $serverPath; WorkingDirectory = $installDirectory; PassThru = $true
+                    RedirectStandardOutput = (Join-Path $velronHome 'server.log')
+                    RedirectStandardError = (Join-Path $velronHome 'server-error.log')
+                }
+                if ($NonInteractive) { $startArguments.WindowStyle = 'Hidden' }
+                $serverProcess = Start-Process @startArguments
+                Wait-ServerReady $serverProcess $velronHome
             }
-            if ($NonInteractive) { $startArguments.WindowStyle = 'Hidden' }
-            $serverProcess = Start-Process @startArguments
-            Wait-ServerReady $serverProcess $velronHome
             Write-Success 'Velron Server is responding and authentication is ready'
             Write-Info "Management token file (private): $(Join-Path $velronHome 'management-token')"
         }
@@ -643,6 +705,9 @@ Write-Host ''
 Write-Success 'Velron installation is complete.'
 Write-Stage 'complete'
 Write-Host 'Open a new terminal, then run:'
-if ($installServer) { Write-Host '  velron' }
+if ($installServer) {
+    if ($serverCommands) { Write-Host '  velron on'; Write-Host '  velron status / velron off / velron stream' }
+    else { Write-Host '  velron' }
+}
 if ($installClient) { Write-Host '  velron-client --help' }
 if ($installClient) { Write-Host 'Restart your MCP host to load the stdio connection.' }

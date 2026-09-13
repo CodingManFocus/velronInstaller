@@ -269,6 +269,49 @@ validate_state_home() {
   fi
 }
 
+runServerCommand() {
+  commandTimeout=$1; commandOutput=$2
+  shift 2
+  "$SERVER_COMMAND" "$@" >"$commandOutput" 2>"$TEMP_DIR/server-command-error.txt" &
+  serverCommandPid=$!
+  commandElapsed=0
+  while kill -0 "$serverCommandPid" 2>/dev/null; do
+    if [ "$commandElapsed" -ge "$commandTimeout" ]; then
+      kill -KILL "$serverCommandPid" 2>/dev/null || :
+      wait "$serverCommandPid" 2>/dev/null || :
+      serverCommandPid=''
+      return 124
+    fi
+    sleep 1
+    commandElapsed=$((commandElapsed + 1))
+  done
+  commandResult=0
+  wait "$serverCommandPid" || commandResult=$?
+  serverCommandPid=''
+  return "$commandResult"
+}
+
+detectServerCommands() {
+  serverCommands=false
+  backgroundArgument=''; foregroundArgument=''; launchArgument=''
+  # Help bypasses startup/update dispatch in both old and new Server releases.
+  if ! runServerCommand 15 "$TEMP_DIR/server-help.txt" --help; then
+    die "Could not inspect Velron Server commands. Run velron --help to diagnose the installed binary."
+  fi
+  if grep -Fxq 'Usage: velron [on|off|status|stream|run]' "$TEMP_DIR/server-help.txt"; then
+    serverCommands=true
+    backgroundArgument=' on'; foregroundArgument=' run'; launchArgument='<string>run</string>'
+  fi
+}
+
+assertServerRunning() {
+  # status authenticates the instance in VELRON_HOME; exit 0 alone can mean stopped.
+  if ! runServerCommand 15 "$TEMP_DIR/server-status.txt" status ||
+      ! grep -Eq '^Velron is running \((background|foreground), PID [0-9]+\)\.$' "$TEMP_DIR/server-status.txt"; then
+    die "Velron Server is not confirmed running. Check velron status and velron stream."
+  fi
+}
+
 wait_server_ready() {
   # Existing settings are authoritative when the user elects to preserve them.
   readiness_host=$SERVER_HOST; readiness_port=$SERVER_HTTP_PORT
@@ -309,6 +352,7 @@ wait_server_ready() {
           die "Velron LaunchAgent is not running. Check $VELRON_HOME_PATH/server-error.log."
         fi
       fi
+      if [ "$serverCommands" = true ]; then assertServerRunning; fi
       return
     fi
     readiness_attempt=$((readiness_attempt + 1))
@@ -462,7 +506,7 @@ configure_autostart() {
       unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
       unit_file="$unit_dir/velron.service"
       mkdir -p "$unit_dir"
-      systemd_exec=$(printf '%s' "$autostart_command" | sed 's/\\/\\\\/g; s/"/\\"/g')
+      systemd_exec=$(printf '%s' "$autostart_command" | sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g; s/\$/$$/g')
       cat >"$unit_file" <<EOF
 [Unit]
 Description=Velron Server
@@ -470,7 +514,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart="$systemd_exec"
+ExecStart="$systemd_exec"$foregroundArgument
 Restart=on-failure
 RestartSec=3
 
@@ -484,13 +528,14 @@ EOF
     else
       desktop_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
       mkdir -p "$desktop_dir"
-      escaped_exec=$(printf '%s' "$autostart_command" | sed 's/ /\\ /g; s/%/%%/g')
+      # Exec has both desktop-string and argument quoting layers.
+      escaped_exec=$(printf '%s' "$autostart_command" | sed 's/\\/\\\\\\\\/g; s/"/\\\\"/g; s/`/\\\\`/g; s/\$/\\\\$/g; s/%/%%/g')
       cat >"$desktop_dir/velron.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Velron Server
 Comment=Start Velron Server when you sign in
-Exec=$escaped_exec
+Exec="$escaped_exec"$backgroundArgument
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF
@@ -509,7 +554,7 @@ EOF
 <plist version="1.0">
 <dict>
   <key>Label</key><string>com.codenamemc.velron</string>
-  <key>ProgramArguments</key><array><string>$escaped_xml</string></array>
+  <key>ProgramArguments</key><array><string>$escaped_xml</string>$launchArgument</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
   <key>StandardOutPath</key><string>$escaped_home_xml/server.log</string>
@@ -703,6 +748,10 @@ SERVER_SWAPPING=false
 CLIENT_SWAPPING=false
 cleanup() {
   cleanup_status=$?
+  if [ -n "${serverCommandPid:-}" ]; then
+    kill -KILL "$serverCommandPid" 2>/dev/null || :
+    wait "$serverCommandPid" 2>/dev/null || :
+  fi
   for component in server client; do
     if [ "$component" = server ]; then
       destination=${SERVER_RUNTIME:-}; swapping=$SERVER_SWAPPING
@@ -849,6 +898,7 @@ fi
 
 if [ "$INSTALL_SERVER" = true ]; then
   stage startup
+  detectServerCommands
   if [ "$ENABLE_AUTOSTART" = true ]; then
     configure_autostart "$SERVER_COMMAND"
   else
@@ -862,6 +912,10 @@ if [ "$INSTALL_SERVER" = true ]; then
       launchctl bootout "gui/$(id -u)/com.codenamemc.velron" >/dev/null 2>&1 || true
       launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.codenamemc.velron.plist" >/dev/null 2>&1 || die "LaunchAgent could not be loaded. Check launchctl diagnostics and retry."
       launchctl kickstart -k "gui/$(id -u)/com.codenamemc.velron" >/dev/null 2>&1 || die "LaunchAgent could not be started."
+    elif [ "$serverCommands" = true ]; then
+      # on detaches itself. Its private Management URL must not reach GUI logs.
+      runServerCommand 130 "$TEMP_DIR/server-on.txt" on || die "Velron Server could not start. Check velron status and velron stream."
+      assertServerRunning
     else
       nohup "$SERVER_COMMAND" >"$VELRON_HOME_PATH/server.log" 2>"$VELRON_HOME_PATH/server-error.log" &
       STARTED_SERVER_PID=$!
@@ -876,7 +930,10 @@ say ""
 success "Velron installation is complete."
 stage complete
 say "Open a new terminal, then run:"
-[ "$INSTALL_SERVER" = true ] && say "  velron"
+if [ "$INSTALL_SERVER" = true ]; then
+  say "  velron$backgroundArgument"
+  [ "$serverCommands" != true ] || say "  velron status / velron off / velron stream"
+fi
 [ "$INSTALL_CLIENT" = true ] && say "  velron-client --help"
 if [ "$INSTALL_CLIENT" = true ]; then
   info "Restart your MCP host to load the stdio Client and its new call_agent schema."

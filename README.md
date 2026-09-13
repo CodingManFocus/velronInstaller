@@ -70,6 +70,18 @@ All locations can be changed in the wizard where doing so is safe. The Server st
 uses a per-user Startup shortcut on Windows, a LaunchAgent on macOS, and a systemd user service
 (or desktop autostart fallback) on Linux.
 
+For releases with process commands, Windows Startup and Linux desktop autostart run `velron on`.
+systemd and launchd run `velron run`, so the service manager retains the foreground process.
+Reinstalling with autostart enabled replaces the Installer-owned registration with these arguments.
+The Installer checks the downloaded Server's help output first; older releases keep their original
+argument-free startup command. Application auto-update does not rewrite OS startup registrations.
+
+Use `velron on`, `velron off`, `velron status`, and `velron stream` to control or inspect the installed
+Server. `velron` and `velron run` still run it in the current terminal. These commands use the same
+configured data directory as the startup registration. For systemd, an intentional `velron off`
+does not trigger `Restart=on-failure`; use `systemctl --user start velron.service` to restart under
+systemd supervision. On macOS, use `launchctl kickstart gui/$(id -u)/com.codenamemc.velron`.
+
 ## MCP connection and workspace paths
 
 Velron Client is a regular stdio MCP server. The installer registers the absolute Client command with

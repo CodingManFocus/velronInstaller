@@ -15,7 +15,8 @@ async function fixture(t) {
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const home = path.join(dir, "home with 'quotes and \\slashes");
   const bin = path.join(dir, 'tools'); const downloads = path.join(dir, 'downloads');
-  await Promise.all([home, bin, downloads].map(value => fs.mkdir(value, { recursive: true })));
+  const temporaryDir = path.join(dir, 'tmp');
+  await Promise.all([home, bin, downloads, temporaryDir].map(value => fs.mkdir(value, { recursive: true })));
   const assets = [];
   for (const component of ['velron', 'velron-client']) {
     for (const platform of ['linux', 'macos']) for (const arch of ['x64', 'arm64']) {
@@ -31,7 +32,7 @@ async function fixture(t) {
   await fs.writeFile(path.join(bin, 'launchctl'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   for (const host of ['codex', 'claude']) await fs.writeFile(path.join(bin, host), '#!/bin/sh\n[ "$1 $2 $3" = "mcp get --help" ] && exit 0\n[ "$1 $2 $3" = "mcp get velron" ] && exit "${FAKE_EXISTING_ENTRY:-1}"\nprintf "%s\\n" "$*" >> "$FAKE_HOST_CALLS"\nexit 0\n', { mode: 0o755 });
   const options = { ...getDefaults(process.platform, home), autostart: false, startNow: false, integration: 'both' };
-  const env = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, XDG_DATA_HOME: path.join(dir, 'data'),
+  const env = { ...process.env, HOME: home, TMPDIR: temporaryDir, PATH: `${bin}:${process.env.PATH}`, XDG_DATA_HOME: path.join(dir, 'data'),
     XDG_CONFIG_HOME: path.join(dir, 'config'), FAKE_DOWNLOADS: downloads, FAKE_HOST_CALLS: path.join(dir, 'host-calls'), NO_COLOR: '1' };
   return { dir, home, bin, downloads, options, env, run: (patch = {}, extra = {}) => exec('/bin/sh', [engine, '--non-interactive'], {
     env: { ...env, ...toEnvironment({ ...options, ...patch }), ...extra }, timeout: 20000, maxBuffer: 1024 * 1024,
@@ -88,6 +89,163 @@ async function rewriteAssets(f, version, corruptClient = false) {
     sums.push((corruptClient && name.startsWith('velron-client-') ? '0'.repeat(64) : crypto.createHash('sha256').update(content).digest('hex')) + '  ' + name);
   }
   await fs.writeFile(path.join(f.downloads, 'SHA256SUMS.txt'), sums.join('\n') + '\n');
+}
+
+async function setServerAsset(f, content) {
+  const sums = [];
+  for (const name of await fs.readdir(f.downloads)) {
+    if (name === 'SHA256SUMS.txt') continue;
+    const file = path.join(f.downloads, name);
+    if (!name.startsWith('velron-client-')) await fs.writeFile(file, content);
+    sums.push(crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex') + '  ' + name);
+  }
+  await fs.writeFile(path.join(f.downloads, 'SHA256SUMS.txt'), sums.join('\n') + '\n');
+}
+
+const modernServer = `#!/bin/sh
+printf '%s\\n' "$*" >> "$VELRON_HOME/command-calls"
+case "$1" in
+  --help) printf '%s\\n' 'Usage: velron [on|off|status|stream|run]';;
+  on) printf '%s\\n' 'Management: http://localhost/?token=synthetic-private-token'; exit "\${FAKE_ON_EXIT:-0}";;
+  status)
+    if [ "\${FAKE_SERVER_STOPPED:-false}" = true ]; then
+      printf '%s\\n' 'Velron is not running.'
+    else
+      printf '%s\\n' 'Velron is running (background, PID 123).' 'Management: http://localhost/?token=synthetic-private-token'
+    fi;;
+  *) exit 99;;
+esac
+`;
+
+async function fakeHealth(f) {
+  const file = path.join(f.bin, 'curl');
+  const original = await fs.readFile(file, 'utf8');
+  await fs.writeFile(file, original.replace('#!/bin/sh\n', `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in http://*) health=true;; esac
+done
+if [ "\${health:-false}" = true ]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -o ]; then shift; output=$1; fi
+    shift
+  done
+  printf '%s' '{"error":{"code":"management_authentication_required"}}' > "$output"
+  printf '401'
+  exit 0
+fi
+`));
+}
+
+test('modern on may exit successfully while authenticated status verifies the detached server', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t);
+  await setServerAsset(f, modernServer);
+  await fakeHealth(f);
+  const { stdout, stderr } = await f.run({ components: 'server', startNow: true });
+  assert.match(stdout, /VELRON_INSTALL_STAGE:complete/);
+  assert.doesNotMatch(stdout + stderr, /synthetic-private-token/);
+  assert.deepEqual((await fs.readFile(path.join(f.options.velronHome, 'command-calls'), 'utf8')).trim().split('\n'),
+    ['--help', 'on', 'status', 'status']);
+  await assert.rejects(fs.stat(path.join(f.options.velronHome, 'server.log')));
+  assert.deepEqual(await fs.readdir(f.env.TMPDIR), []);
+});
+
+test('modern startup rejects failed on and stopped status even when another server answers health', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t);
+  await setServerAsset(f, modernServer);
+  await fakeHealth(f);
+  for (const extra of [{ FAKE_ON_EXIT: '17' }, { FAKE_SERVER_STOPPED: 'true' }]) {
+    await assert.rejects(f.run({ components: 'server', startNow: true }, extra), error => {
+      assert.doesNotMatch(error.stdout, /VELRON_INSTALL_STAGE:complete|authentication is ready/);
+      assert.doesNotMatch(error.stdout + error.stderr, /synthetic-private-token/);
+      assert.match(error.stderr, /could not start|not confirmed running/);
+      return true;
+    });
+    assert.deepEqual(await fs.readdir(f.env.TMPDIR), []);
+  }
+});
+
+test('failed capability probes fail installation instead of guessing legacy startup', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t);
+  await setServerAsset(f, '#!/bin/sh\nexit 7\n');
+  await assert.rejects(f.run({ components: 'server', autostart: true }), error => {
+    assert.match(error.stderr, /Could not inspect Velron Server commands/);
+    assert.doesNotMatch(error.stdout, /VELRON_INSTALL_STAGE:complete|Registered Velron/);
+    return true;
+  });
+  assert.deepEqual(await fs.readdir(f.env.TMPDIR), []);
+});
+
+test('a hung Server command is bounded and only its owned child is terminated', { skip: process.platform === 'win32' }, async t => {
+  const f = await fixture(t);
+  const source = await fs.readFile(engine, 'utf8');
+  const helper = source.slice(source.indexOf('runServerCommand() {'), source.indexOf('detectServerCommands() {'));
+  const command = path.join(f.bin, 'hung-command');
+  await fs.writeFile(command, '#!/bin/sh\nexec sleep 10\n', { mode: 0o755 });
+  const harness = path.join(f.dir, 'timeout.sh');
+  await fs.writeFile(harness, 'set -eu\nSERVER_COMMAND=$1\nTEMP_DIR=$2\n' + helper + '\nrunServerCommand 1 "$TEMP_DIR/output" --help\n');
+  await assert.rejects(exec('/bin/sh', [harness, command, f.env.TMPDIR], { timeout: 5000 }), error => error.code === 124);
+});
+
+test('installed native Server starts detached, reports running, and stops through its launcher', {
+  skip: process.platform === 'win32' || !process.env.VELRON_TEST_SERVER_BINARY,
+}, async t => {
+  const f = await fixture(t);
+  // Bun's realpath does not support literal backslashes in POSIX path components.
+  // Keep the launcher quoting fixture; use a supported data path for the real runtime.
+  f.options.velronHome = path.join(f.dir, "native home with 'quotes", '.velron');
+  await setServerAsset(f, await fs.readFile(process.env.VELRON_TEST_SERVER_BINARY));
+  const listeners = [require('node:net').createServer(), require('node:net').createServer()];
+  await Promise.all(listeners.map(listener => new Promise(resolve => listener.listen(0, '127.0.0.1', resolve))));
+  const [httpPort, vcpPort] = listeners.map(listener => listener.address().port);
+  await Promise.all(listeners.map(listener => new Promise(resolve => listener.close(resolve))));
+  const realCurl = (await exec('/bin/sh', ['-c', 'command -v curl'])).stdout.trim();
+  const curlFile = path.join(f.bin, 'curl');
+  const original = await fs.readFile(curlFile, 'utf8');
+  await fs.writeFile(curlFile, original.replace('#!/bin/sh\n', '#!/bin/sh\nfor arg in "$@"; do\n case "$arg" in http://*) exec "$FAKE_REAL_CURL" "$@";; esac\ndone\n'));
+  const launcher = path.join(f.options.commandDir, 'velron');
+  try {
+    const { stdout, stderr } = await f.run({ components: 'server', startNow: true, httpPort, vcpPort }, { FAKE_REAL_CURL: realCurl });
+    assert.match(stdout, /VELRON_INSTALL_STAGE:complete/);
+    const status = await exec(launcher, ['status'], { env: f.env, timeout: 15000 });
+    assert.match(status.stdout, /^Velron is running \(background, PID \d+\)\./);
+    const token = (await fs.readFile(path.join(f.options.velronHome, 'management-token'), 'utf8')).trim();
+    assert.ok(token.length > 0);
+    assert.ok(!(stdout + stderr).includes(token));
+  } finally {
+    await exec(launcher, ['off'], { env: f.env, timeout: 35000 });
+  }
+  const stopped = await exec(launcher, ['status'], { env: f.env, timeout: 15000 });
+  assert.match(stopped.stdout, /Velron is not running/);
+});
+
+for (const kind of ['desktop', 'systemd', 'launchd']) {
+  test(`autostart ${kind} rewrites arguments for modern and legacy releases`, { skip: process.platform === 'win32' }, async t => {
+    const f = await fixture(t);
+    await fs.writeFile(path.join(f.bin, 'uname'), `#!/bin/sh\ncase "$1" in -s) echo ${kind === 'launchd' ? 'Darwin' : 'Linux'};; -m) echo x86_64;; esac\n`, { mode: 0o755 });
+    if (kind === 'systemd') await fs.writeFile(path.join(f.bin, 'systemctl'), '#!/bin/sh\nexit 0\n');
+    const commandDir = path.join(f.home, 'commands "$cash`tick%value');
+    const registration = kind === 'launchd'
+      ? path.join(f.home, 'Library/LaunchAgents/com.codenamemc.velron.plist')
+      : path.join(f.env.XDG_CONFIG_HOME, kind === 'systemd' ? 'systemd/user/velron.service' : 'autostart/velron.desktop');
+    for (const modern of [false, true, false]) {
+      await setServerAsset(f, modern ? modernServer : '#!/bin/sh\necho "Usage: velron"\n');
+      await f.run({ components: 'server', commandDir, autostart: true });
+      const body = await fs.readFile(registration, 'utf8');
+      if (kind === 'launchd') {
+        assert.equal(body.includes('<string>run</string>'), modern);
+        assert.ok(body.includes('<string>' + path.join(commandDir, 'velron') + '</string>'));
+      } else {
+        const line = body.split('\n').find(line => line.startsWith(kind === 'systemd' ? 'ExecStart=' : 'Exec='));
+        assert.ok(line.endsWith('"' + (modern ? (kind === 'systemd' ? ' run' : ' on') : '')));
+        // Decode the two format-specific quoting layers back to the exact executable path.
+        let quoted = line.slice(line.indexOf('=') + 1);
+        if (modern) quoted = quoted.slice(0, kind === 'systemd' ? -4 : -3);
+        if (kind === 'desktop') quoted = quoted.replace(/\\\\/g, '\\');
+        const decoded = quoted.slice(1, -1).replace(/\\([\\`"$])/g, '$1').replace(/%%/g, '%');
+        assert.equal(kind === 'systemd' ? decoded.replace(/\$\$/g, '$') : decoded, path.join(commandDir, 'velron'));
+      }
+    }
+  });
 }
 
 test('a later Client checksum failure leaves both existing runtimes and configuration intact', { skip: process.platform === 'win32' }, async t => {
@@ -155,7 +313,7 @@ test('startup waits for a live authentication endpoint using the preserved manag
   const configFile = path.join(f.options.velronHome, 'config.json');
   await fs.writeFile(configFile, JSON.stringify(JSON.parse(await fs.readFile(configFile, 'utf8'))));
   const pidFile = path.join(f.dir, 'server.pid');
-  const program = `#!${process.execPath}\nconst fs=require('node:fs');const config=JSON.parse(fs.readFileSync(process.env.VELRON_HOME+'/config.json'));fs.writeFileSync(process.env.FAKE_SERVER_PID,String(process.pid));require('node:http').createServer((request,response)=>{response.writeHead(401,{'Content-Type':'application/json'});response.end(JSON.stringify({error:{code:'management_authentication_required'}}));}).listen(config.port,config.host);\n`;
+  const program = `#!${process.execPath}\nif(process.argv.includes('--help')){console.log('Usage: velron');process.exit(0);}const fs=require('node:fs');const config=JSON.parse(fs.readFileSync(process.env.VELRON_HOME+'/config.json'));fs.writeFileSync(process.env.FAKE_SERVER_PID,String(process.pid));require('node:http').createServer((request,response)=>{response.writeHead(401,{'Content-Type':'application/json'});response.end(JSON.stringify({error:{code:'management_authentication_required'}}));}).listen(config.port,config.host);\n`;
   const sums = [];
   for (const name of await fs.readdir(f.downloads)) {
     if (name === 'SHA256SUMS.txt') continue;

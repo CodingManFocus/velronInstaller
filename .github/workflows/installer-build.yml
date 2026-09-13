@@ -34,6 +34,12 @@ jobs:
       - name: Check PowerShell GUI input adapter
         shell: pwsh
         run: ./tests/testPowerShellAdapter.ps1
+      - name: Check Windows startup with PowerShell 7
+        shell: pwsh
+        run: ./tests/testServerStartup.ps1
+      - name: Check Windows startup with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/testServerStartup.ps1
       - run: node tests/nativeSmoke.cjs
       - run: npm run build:windows
       - name: Check packaged Windows application

@@ -37,10 +37,22 @@ Server and Client processes before upgrading. The Installer reports a locked exe
 preserves/restores the previous binaries where the OS permits; it does not forcibly terminate
 running applications to replace them.
 
-When immediate startup is selected, success requires a live Server process/service and the expected
-unauthenticated management response. This checks management listener readiness; it does not test
-configured model providers. Startup failures point to `server-error.log`, `server.log`, or the user
-service journal. The GUI's **Open Velron** checks a numeric loopback endpoint, reads the private
+For Server releases with process commands, Windows Startup and Linux desktop autostart use `on`;
+systemd and launchd use `run` to retain service supervision. Reinstalling with autostart enabled
+updates the Installer-owned registration. A bounded `--help` probe keeps older Server releases on
+their existing argument-free startup path; a failed probe fails installation instead of guessing.
+
+When immediate startup is selected without a service manager, the Installer waits for `on` to
+finish successfully, then verifies authenticated `status` for the configured data directory.
+It does not expect the short-lived `on` process to stay alive. Success also requires the expected
+unauthenticated management response and a final running-status check. Service-manager startup
+additionally checks the service; older releases retain their live-process/service readiness checks.
+These checks do not test configured model providers. Command output may contain a private Management
+URL, so it is excluded from Installer logs; POSIX capture files are private and removed on exit.
+Modern startup failures point to `velron status` and `velron stream`; older releases use
+`server-error.log`, `server.log`, or the user service journal.
+
+The GUI's **Open Velron** checks a numeric loopback endpoint, reads the private
 `management-token` file, and hands it to the browser in a URL fragment. The token is never returned
 to the renderer or included in Installer logs. Automatic sign-in requires a loopback/wildcard bind;
 custom network binds receive instructions to enable local access. The runtime writes the token file
