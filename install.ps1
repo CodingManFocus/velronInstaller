@@ -513,7 +513,7 @@ $startServerNow = $false
 if ($installServer) {
     $existingConfigPath = Join-Path $velronHome 'config.json'
     if ((Test-Path -LiteralPath $existingConfigPath -PathType Leaf) -and
-        (Read-Confirmation "Keep the existing Server config at $existingConfigPath?" $true)) {
+        (Read-Confirmation "Keep the existing Server config at ${existingConfigPath}?" $true)) {
         try {
             $existingConfig = Get-Content -Raw -LiteralPath $existingConfigPath | ConvertFrom-Json
             if ($existingConfig.localVcpPort) { $serverVcpPort = [int]$existingConfig.localVcpPort }

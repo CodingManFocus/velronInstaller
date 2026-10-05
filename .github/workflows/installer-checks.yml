@@ -28,3 +28,9 @@ jobs:
       - name: Check Windows architecture with Windows PowerShell 5.1
         shell: powershell
         run: ./installer/tests/testWindowsArchitecture.ps1
+      - name: Check interactive prompts with PowerShell 7
+        shell: pwsh
+        run: ./installer/tests/testInteractivePrompts.ps1
+      - name: Check interactive prompts with Windows PowerShell 5.1
+        shell: powershell
+        run: ./installer/tests/testInteractivePrompts.ps1
