@@ -88,6 +88,20 @@ function Read-Confirmation([string]$Label, [bool]$Default = $true) {
     }
 }
 
+function Get-WindowsArchitecture {
+    # WOW64 exposes the native OS architecture here when PowerShell is emulated.
+    # These variables also work in Windows PowerShell without RuntimeInformation.
+    $architecture = $env:PROCESSOR_ARCHITEW6432
+    if ([string]::IsNullOrWhiteSpace($architecture)) {
+        $architecture = $env:PROCESSOR_ARCHITECTURE
+    }
+    switch ($architecture) {
+        'AMD64' { return 'x64' }
+        'ARM64' { return 'arm64' }
+        default { throw "Unsupported Windows architecture: $architecture" }
+    }
+}
+
 function Resolve-AbsolutePath([string]$Value) {
     $expanded = [Environment]::ExpandEnvironmentVariables($Value.Trim())
     if ($expanded -eq '~') { $expanded = $HOME }
@@ -443,12 +457,7 @@ function Install-HostMcp(
 Write-Host 'Velron installer' -ForegroundColor Blue
 Write-Host 'Server, Client, stdio MCP, PATH, and startup setup'
 
-$architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-$architectureName = switch ($architecture) {
-    'x64' { 'x64' }
-    'arm64' { 'arm64' }
-    default { throw "Unsupported Windows architecture: $architecture" }
-}
+$architectureName = Get-WindowsArchitecture
 
 if ($NonInteractive) {
     if ($env:VELRON_INSTALL_COMPONENTS -notin @('both', 'server', 'client')) { throw 'Invalid component selection.' }

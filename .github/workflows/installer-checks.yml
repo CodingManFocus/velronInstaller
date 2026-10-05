@@ -22,16 +22,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Parse PowerShell installer
+      - name: Check Windows architecture with PowerShell 7
         shell: pwsh
-        run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path ./install.ps1),
-            [ref] $tokens,
-            [ref] $errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $errors | Format-List | Out-String | Write-Error
-          }
+        run: ./installer/tests/testWindowsArchitecture.ps1
+      - name: Check Windows architecture with Windows PowerShell 5.1
+        shell: powershell
+        run: ./installer/tests/testWindowsArchitecture.ps1
