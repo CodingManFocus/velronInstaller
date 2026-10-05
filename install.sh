@@ -23,7 +23,7 @@ esac
 
 if [ "$NON_INTERACTIVE" = true ]; then
   TTY=/dev/null
-elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+elif ( : </dev/tty >/dev/tty ) 2>/dev/null; then
   TTY=/dev/tty
 else
   printf '%s\n' "Velron installer requires an interactive terminal." >&2
@@ -132,18 +132,18 @@ prompt() {
   printf '%s' "$prompt_answer"
 }
 
-secret_prompt() {
+secret_prompt() (
   secret_label=$1
+  # Keep restoration local to this prompt and run it on success, EOF, or signals.
+  trap 'stty echo <"$TTY" 2>/dev/null || true' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' HUP TERM
+  stty -echo <"$TTY" 2>/dev/null || die "Could not hide token input."
   printf '%b' "${BOLD}$secret_label${RESET}: " >"$TTY"
-  stty -echo <"$TTY" 2>/dev/null || true
-  IFS= read -r secret_answer <"$TTY" || {
-    stty echo <"$TTY" 2>/dev/null || true
-    die "Input was cancelled."
-  }
-  stty echo <"$TTY" 2>/dev/null || true
+  IFS= read -r secret_answer <"$TTY" || die "Input was cancelled."
   printf '\n' >"$TTY"
   printf '%s' "$secret_answer"
-}
+)
 
 menu() {
   menu_title=$1
@@ -207,7 +207,8 @@ absolute_path() {
 }
 
 valid_port() {
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  # Ports are emitted as JSON numbers, which cannot contain leading zeroes.
+  case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac
   [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null
 }
 

@@ -108,6 +108,10 @@ for UI tests. Engine tests use temporary directories and fake downloads, and do 
 Velron onto the developer's account. Native smoke tests open the real window and verify the
 sandboxed bridge and input validation without starting an installation.
 
+On Linux and macOS, interactive engine tests require Python 3 and use its standard-library
+pseudo-terminal support to exercise the piped installer, hidden token input, and cancellation.
+No additional Python packages are needed.
+
 Build on the corresponding OS with `npm run build:windows`, `npm run build:macos`, or
 `npm run build:linux`. CI packages both Linux architectures into the shared archive, builds a
 universal macOS application, checks native source and packaged windows, and captures screenshots.

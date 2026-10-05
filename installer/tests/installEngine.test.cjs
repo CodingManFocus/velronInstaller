@@ -39,6 +39,161 @@ async function fixture(t) {
   }) };
 }
 
+async function runInteractive(f, steps, shell = '/bin/sh') {
+  return exec('python3', [path.join(__dirname, 'runInteractiveShell.py'), shell, engine, JSON.stringify(steps)], {
+    env: f.env, timeout: 30000, maxBuffer: 1024 * 1024,
+  });
+}
+
+function interactiveSteps(f, { choice = '1', existing = false, keep = true, remote = false, proceed = true } = {}) {
+  const steps = [
+    { prompt: 'Select [1]: ', answer: choice },
+    { prompt: 'Velron data and configuration directory', answer: f.options.velronHome },
+    { prompt: 'Command directory (added to PATH)', answer: f.options.commandDir },
+  ];
+  if (choice !== '3') {
+    if (existing) steps.push({ prompt: 'Keep the existing Server config at', answer: keep ? '' : 'n' });
+    if (!existing || !keep) steps.push(
+      { prompt: 'Server bind host', answer: '' },
+      { prompt: 'Management HTTP port', answer: '5151' },
+      { prompt: 'Pinned local VCP port', answer: '5153' },
+      { prompt: 'Additional allowed hosts', answer: 'example.test, [::1]' },
+    );
+    steps.push(
+      { prompt: 'Start Velron Server automatically when you sign in?', answer: 'n' },
+      { prompt: 'Start Velron Server after installation?', answer: 'n' },
+    );
+  }
+  if (choice !== '2') {
+    steps.push({ prompt: 'VCP URL', answer: remote ? 'wss://example.test:4141/vcp/v1' : '' });
+    if (remote) steps.push({ prompt: 'VCP access token', answer: 'a'.repeat(43) });
+    steps.push({ prompt: 'Select [1]: ', answer: '4' });
+  }
+  steps.push({ prompt: 'Continue?', answer: proceed ? 'y' : 'n' });
+  return steps;
+}
+
+for (const shell of ['/bin/sh', '/bin/bash', '/bin/dash']) {
+  test(`piped interactive installer completes both components with ${shell}`, {
+    skip: process.platform === 'win32' || (shell === '/bin/dash' && process.platform !== 'linux'),
+  }, async t => {
+    const f = await fixture(t);
+    const { stdout } = await runInteractive(f, interactiveSteps(f), shell);
+    assert.match(stdout, /Velron installation is complete/);
+    const config = JSON.parse(await fs.readFile(path.join(f.options.velronHome, 'config.json'), 'utf8'));
+    assert.equal(config.port, 5151);
+    assert.equal(config.localVcpPort, 5153);
+    assert.deepEqual(config.allowedHosts, ['example.test', '[::1]']);
+    for (const command of ['velron', 'velron-client']) {
+      const { stdout: result } = await exec(path.join(f.options.commandDir, command), ['--help'], { env: f.env });
+      assert.match(result, /fake binary/);
+    }
+    assert.deepEqual(await fs.readdir(f.env.TMPDIR), []);
+  });
+}
+
+test('interactive reinstall preserves existing config and can replace it explicitly', {
+  skip: process.platform === 'win32',
+}, async t => {
+  const f = await fixture(t);
+  await f.run({ httpPort: 6151, vcpPort: 6153 });
+  const configFile = path.join(f.options.velronHome, 'config.json');
+  const before = await fs.readFile(configFile, 'utf8');
+  const { stdout } = await runInteractive(f, interactiveSteps(f, { existing: true }));
+  assert.match(stdout, /6153\/vcp\/v1/);
+  assert.equal(await fs.readFile(configFile, 'utf8'), before);
+  await runInteractive(f, interactiveSteps(f, { existing: true, keep: false }));
+  const config = JSON.parse(await fs.readFile(configFile, 'utf8'));
+  assert.equal(config.port, 5151);
+  assert.equal(config.localVcpPort, 5153);
+});
+
+for (const choice of ['2', '3']) {
+  test(`interactive component selection ${choice} installs only the requested binary`, {
+    skip: process.platform === 'win32',
+  }, async t => {
+    const f = await fixture(t);
+    const { stdout } = await runInteractive(f, interactiveSteps(f, { choice }));
+    assert.match(stdout, /Velron installation is complete/);
+    const selected = choice === '2' ? 'velron' : 'velron-client';
+    const other = choice === '2' ? 'velron-client' : 'velron';
+    await fs.access(path.join(f.options.commandDir, selected));
+    await assert.rejects(fs.access(path.join(f.options.commandDir, other)));
+  });
+}
+
+test('interactive remote token is hidden and written only to the private Client settings', {
+  skip: process.platform === 'win32',
+}, async t => {
+  const f = await fixture(t);
+  const { stdout } = await runInteractive(f, interactiveSteps(f, { choice: '3', remote: true }));
+  assert.match(stdout, /Velron installation is complete/);
+  assert.ok(!stdout.includes('a'.repeat(43)));
+  const envFile = path.join(f.options.velronHome, 'client.env');
+  assert.ok((await fs.readFile(envFile, 'utf8')).includes('a'.repeat(43)));
+  assert.equal((await fs.stat(envFile)).mode & 0o777, 0o600);
+});
+
+test('interactive cancellation and terminal EOF stop before creating installed files', {
+  skip: process.platform === 'win32',
+}, async t => {
+  const f = await fixture(t);
+  const { stdout } = await runInteractive(f, interactiveSteps(f, { proceed: false }));
+  assert.match(stdout, /Installation cancelled/);
+  await assert.rejects(fs.access(f.options.velronHome));
+  await assert.rejects(runInteractive(f, [{ prompt: 'Select [1]: ', answer: null }]), error => {
+    assert.match(error.stdout, /Input was cancelled/);
+    assert.doesNotMatch(error.stdout, /Downloading release checksums|Velron installation is complete/);
+    return true;
+  });
+  await assert.rejects(fs.access(f.options.velronHome));
+});
+
+test('interactive setup without a controlling terminal reports an actionable error', {
+  skip: process.platform === 'win32',
+}, async t => {
+  await assert.rejects(exec('/bin/sh', [engine], { detached: true, timeout: 5000 }), error => {
+    assert.match(error.stderr, /requires an interactive terminal/);
+    assert.doesNotMatch(error.stderr, /cannot create \/dev\/tty/);
+    return true;
+  });
+});
+
+test('interactive invalid or noncanonical ports fail before downloads or configuration writes', {
+  skip: process.platform === 'win32',
+}, async t => {
+  const f = await fixture(t);
+  for (const value of ['0', '65536', '05151']) {
+    const steps = interactiveSteps(f);
+    steps.find(step => step.prompt === 'Management HTTP port').answer = value;
+    await assert.rejects(runInteractive(f, steps), error => {
+      assert.match(error.stdout, /Invalid HTTP port/);
+      assert.doesNotMatch(error.stdout, /Downloading release checksums|Velron installation is complete/);
+      return true;
+    });
+    await assert.rejects(fs.access(f.options.velronHome));
+  }
+});
+
+test('interactive secret input restores terminal echo on EOF and Ctrl+C', {
+  skip: process.platform === 'win32',
+}, async t => {
+  const f = await fixture(t);
+  for (const answer of [null, '\x03']) {
+    const steps = interactiveSteps(f, { choice: '3', remote: true });
+    const index = steps.findIndex(step => step.prompt === 'VCP access token');
+    steps[index].answer = answer;
+    steps[index].waitForHiddenInput = true;
+    await assert.rejects(runInteractive(f, steps.slice(0, index + 1)), error => {
+      assert.doesNotMatch(error.stderr, /left terminal echo disabled/, JSON.stringify({ answer, output: error.stdout }));
+      assert.doesNotMatch(error.stderr, /Traceback|TimeoutError|RuntimeError/, error.stdout);
+      assert.doesNotMatch(error.stdout, /Downloading release checksums|Velron installation is complete/);
+      return true;
+    });
+    await assert.rejects(fs.access(f.options.velronHome));
+  }
+});
+
 test('headless engine installs both components, configures remote MCP and preserves exact quoted paths', { skip: process.platform === 'win32' }, async t => {
   const f = await fixture(t); const token = 'a'.repeat(43);
   const { stdout } = await f.run({ connection: 'remote', vcpUrl: 'wss://example.com:4141/vcp/v1', vcpToken: token });
